@@ -20,6 +20,7 @@ lib_LTLIBRARIES =
 noinst_LTLIBRARIES = 
 noinst_LIBRARIES =
 radoslib_LTLIBRARIES =
+check_LTLIBRARIES =
 
 # like bin_PROGRAMS, but these targets are only built for debug builds
 bin_DEBUGPROGRAMS =
