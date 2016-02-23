@@ -409,7 +409,8 @@ KStore::Onode::Onode(const ghobject_t& o, const string& k)
     key(k),
     dirty(false),
     exists(true),
-    flush_lock("KStore::Onode::flush_lock") {
+    flush_lock("KStore::Onode::flush_lock"),
+    tail_offset(0) {
 }
 
 void KStore::Onode::flush()
