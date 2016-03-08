@@ -667,6 +667,7 @@ bool coll_t::parse(const std::string& s)
 
 void coll_t::encode(bufferlist& bl) const
 {
+  // when changing this, remember to update encoded_size() too.
   if (is_temp()) {
     // can't express this as v2...
     __u8 struct_v = 3;
@@ -680,6 +681,33 @@ void coll_t::encode(bufferlist& bl) const
     snapid_t snap = CEPH_NOSNAP;
     ::encode(snap, bl);
   }
+}
+
+size_t coll_t::encoded_size() const
+{
+  size_t r = sizeof(__u8);
+  if (is_temp()) {
+    // v3
+    r += sizeof(__u32);
+    if (_str) {
+      r += strlen(_str);
+    }
+  } else {
+      // v2
+      // 1. type
+      r += sizeof(__u8);
+      // 2. pgid
+      //  - encoding header
+      r += sizeof(ceph_le32) + 2 * sizeof(__u8);
+      // - pg_t
+      r += sizeof(__u8) + sizeof(uint64_t) + 2 * sizeof(uint32_t);
+      // - shard_id_t
+      r += sizeof(int8_t);
+      // 3. snapid_t
+      r += sizeof(uint64_t);
+  }
+
+  return r;
 }
 
 void coll_t::decode(bufferlist::iterator& bl)
@@ -2518,6 +2546,7 @@ bool operator==(const pg_stat_t& l, const pg_stat_t& r)
     l.last_fresh == r.last_fresh &&
     l.last_change == r.last_change &&
     l.last_active == r.last_active &&
+    l.last_peered == r.last_peered &&
     l.last_clean == r.last_clean &&
     l.last_unstale == r.last_unstale &&
     l.last_undegraded == r.last_undegraded &&
@@ -2542,6 +2571,7 @@ bool operator==(const pg_stat_t& l, const pg_stat_t& r)
     l.mapping_epoch == r.mapping_epoch &&
     l.blocked_by == r.blocked_by &&
     l.last_became_active == r.last_became_active &&
+    l.last_became_peered == r.last_became_peered &&
     l.dirty_stats_invalid == r.dirty_stats_invalid &&
     l.omap_stats_invalid == r.omap_stats_invalid &&
     l.hitset_stats_invalid == r.hitset_stats_invalid &&
@@ -3270,6 +3300,12 @@ void ObjectModDesc::visit(Visitor *visitor) const
 	set<snapid_t> snaps;
 	::decode(snaps, bp);
 	visitor->update_snaps(snaps);
+	break;
+      }
+      case TRY_DELETE: {
+	version_t old_version;
+	::decode(old_version, bp);
+	visitor->try_rmobject(old_version);
 	break;
       }
       default:
@@ -5497,6 +5533,8 @@ ostream& operator<<(ostream& out, const OSDOp& op)
       break;
     case CEPH_OSD_OP_PG_HITSET_GET:
       out << " " << utime_t(op.op.hit_set_get.stamp);
+      break;
+    case CEPH_OSD_OP_SCRUBLS:
       break;
     }
   } else if (ceph_osd_op_type_multi(op.op.op)) {

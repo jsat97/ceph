@@ -47,11 +47,9 @@ namespace ceph {
 
 enum {
   l_os_first = 84000,
-  l_os_jq_max_ops,
   l_os_jq_ops,
-  l_os_j_ops,
-  l_os_jq_max_bytes,
   l_os_jq_bytes,
+  l_os_j_ops,
   l_os_j_bytes,
   l_os_j_lat,
   l_os_j_wr,
@@ -408,6 +406,8 @@ public:
 
       OP_SETALLOCHINT = 39,  // cid, oid, object_size, write_size
       OP_COLL_HINT = 40, // cid, type, bl
+
+      OP_TRY_RENAME = 41,   // oldcid, oldoid, newoid
     };
 
     // Transaction hint type
@@ -579,7 +579,7 @@ public:
     }
     void register_on_complete(Context *c) {
       if (!c) return;
-      RunOnDeleteRef _complete(new RunOnDelete(c));
+      RunOnDeleteRef _complete (std::make_shared<RunOnDelete>(c));
       register_on_applied(new ContainerContext<RunOnDeleteRef>(_complete));
       register_on_commit(new ContainerContext<RunOnDeleteRef>(_complete));
     }
@@ -808,7 +808,37 @@ public:
         return 1 + 8 + 8 + 4 + 4 + 4 + 4 + 4 + tbl.length();
       else {
         //layout: data_bl + op_bl + coll_index + object_index + data
-        //TODO: maybe we need better way to get encoded bytes;
+
+        // coll_index size, object_index size and sizeof(transaction_data)
+        // all here, so they may be computed at compile-time
+        size_t final_size = sizeof(__u32) * 2 + sizeof(data);
+
+        // coll_index second and object_index second
+        final_size += (coll_index.size() + object_index.size()) * sizeof(__le32);
+
+        // coll_index first
+        for (auto p = coll_index.begin(); p != coll_index.end(); ++p) {
+          final_size += p->first.encoded_size();
+        }
+
+        // object_index first
+        for (auto p = object_index.begin(); p != object_index.end(); ++p) {
+          final_size += p->first.encoded_size();
+        }
+        
+        return data_bl.length() +
+          op_bl.length() +
+          final_size;
+      }
+    }
+
+    /// Retain old version for regression testing purposes
+    uint64_t get_encoded_bytes_test() {
+      if (use_tbl)
+        return 1 + 8 + 8 + 4 + 4 + 4 + 4 + 4 + tbl.length();
+      else {
+        //layout: data_bl + op_bl + coll_index + object_index + data
+
         bufferlist bl;
         ::encode(coll_index, bl);
         ::encode(object_index, bl);
@@ -1411,6 +1441,23 @@ public:
         _op->cid = _get_coll_id(oldcid);
         _op->oid = _get_object_id(oldoid);
         _op->dest_cid = _get_coll_id(cid);
+        _op->dest_oid = _get_object_id(oid);
+      }
+      data.ops++;
+    }
+    void try_rename(coll_t cid, const ghobject_t& oldoid,
+                    const ghobject_t& oid) {
+      if (use_tbl) {
+        __u32 op = OP_TRY_RENAME;
+        ::encode(op, tbl);
+        ::encode(cid, tbl);
+        ::encode(oldoid, tbl);
+        ::encode(oid, tbl);
+      } else {
+        Op* _op = _get_next_op();
+        _op->op = OP_TRY_RENAME;
+        _op->cid = _get_coll_id(cid);
+        _op->oid = _get_object_id(oldoid);
         _op->dest_oid = _get_object_id(oid);
       }
       data.ops++;

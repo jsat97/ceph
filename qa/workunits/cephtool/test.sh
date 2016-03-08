@@ -151,6 +151,13 @@ function ceph_watch_start()
     CEPH_WATCH_FILE=${TMPDIR}/CEPH_WATCH_$$
     ceph $whatch_opt > $CEPH_WATCH_FILE &
     CEPH_WATCH_PID=$!
+
+    # wait until the "ceph" client is connected and receiving
+    # log messages from monitor
+    for i in `seq 3`; do
+        grep -q "cluster" $CEPH_WATCH_FILE && break
+        sleep 1
+    done
 }
 
 function ceph_watch_wait()
@@ -1658,6 +1665,12 @@ function test_osd_bench()
   ceph tell osd.0 bench 104857600 2097152
 }
 
+function test_osd_negative_filestore_merge_threshold()
+{
+  $SUDO ceph daemon osd.0 config set filestore_merge_threshold -1
+  expect_config_value "osd.0" "filestore_merge_threshold" -1
+}
+
 function test_mon_tell()
 {
   ceph tell mon.a version
@@ -1829,6 +1842,7 @@ MON_TESTS+=" mon_ping"
 MON_TESTS+=" mon_deprecated_commands"
 MON_TESTS+=" mon_caps"
 OSD_TESTS+=" osd_bench"
+OSD_TESTS+=" osd_negative_filestore_merge_threshold"
 OSD_TESTS+=" tiering_agent"
 
 MDS_TESTS+=" mds_tell"

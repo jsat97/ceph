@@ -124,6 +124,7 @@ protected:
   rgw_obj obj;
   utime_t gc_invalidate_time;
   bool is_slo;
+  string lo_etag;
 
   int init_common();
 public:
@@ -285,6 +286,10 @@ protected:
   uint64_t buckets_size_rounded;
   map<string, bufferlist> attrs;
   bool is_truncated;
+
+  virtual uint64_t get_default_max() const {
+    return 1000;
+  }
 
 public:
   RGWListBuckets() : sent_data(false) {

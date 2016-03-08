@@ -33,18 +33,22 @@ CloseRequest<I>::CloseRequest(I *image_ctx, Context *on_finish)
 
 template <typename I>
 void CloseRequest<I>::send() {
-  // TODO
-  send_shut_down_aio_queue();
-  //send_unregister_image_watcher();
+  send_unregister_image_watcher();
 }
 
 template <typename I>
 void CloseRequest<I>::send_unregister_image_watcher() {
+  if (m_image_ctx->image_watcher == nullptr) {
+    send_shut_down_aio_queue();
+    return;
+  }
+
   CephContext *cct = m_image_ctx->cct;
   ldout(cct, 10) << this << " " << __func__ << dendl;
 
   // prevent incoming requests from our peers
-
+  m_image_ctx->image_watcher->unregister_watch(create_context_callback<
+    CloseRequest<I>, &CloseRequest<I>::handle_unregister_image_watcher>(this));
 }
 
 template <typename I>
@@ -248,10 +252,7 @@ void CloseRequest<I>::handle_flush_image_watcher(int r) {
 
 template <typename I>
 void CloseRequest<I>::finish() {
-  if (m_image_ctx->image_watcher != nullptr) {
-    m_image_ctx->unregister_watch();
-  }
-
+  m_image_ctx->shutdown();
   m_on_finish->complete(m_error_result);
   delete this;
 }

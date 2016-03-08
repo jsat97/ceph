@@ -762,7 +762,7 @@ int validate_pool(IoCtx &io_ctx, CephContext *cct) {
     ostringstream oss;
     CephContext *cct = (CephContext *)io_ctx.cct();
 
-    ceph_file_layout layout;
+    file_layout_t layout;
 
     int r = validate_pool(io_ctx, cct);
     if (r < 0) {
@@ -825,14 +825,14 @@ int validate_pool(IoCtx &io_ctx, CephContext *cct) {
         goto err_remove_header;
       }
 
-      memset(&layout, 0, sizeof(layout));
-      layout.fl_object_size = 1ull << order;
+      layout = file_layout_t();
+      layout.object_size = 1ull << order;
       if (stripe_unit == 0 || stripe_count == 0) {
-        layout.fl_stripe_unit = layout.fl_object_size;
-        layout.fl_stripe_count = 1;
+        layout.stripe_unit = layout.object_size;
+        layout.stripe_count = 1;
       } else {
-        layout.fl_stripe_unit = stripe_unit;
-        layout.fl_stripe_count = stripe_count;
+        layout.stripe_unit = stripe_unit;
+        layout.stripe_count = stripe_count;
       }
 
       librados::ObjectWriteOperation op;
@@ -1317,7 +1317,10 @@ int validate_pool(IoCtx &io_ctx, CephContext *cct) {
         return r;
       }
 
-      if ((features & RBD_FEATURES_MUTABLE) != features) {
+      uint64_t disable_mask = (RBD_FEATURES_MUTABLE |
+                               RBD_FEATURES_DISABLE_ONLY);
+      if ((enabled && (features & RBD_FEATURES_MUTABLE) != features) ||
+          (!enabled && (features & disable_mask) != features)) {
         lderr(cct) << "cannot update immutable features" << dendl;
         return -EINVAL;
       } else if (features == 0) {
@@ -1390,7 +1393,8 @@ int validate_pool(IoCtx &io_ctx, CephContext *cct) {
             lderr(cct) << "cannot disable exclusive lock" << dendl;
             return -EINVAL;
           }
-          features_mask |= RBD_FEATURE_OBJECT_MAP;
+          features_mask |= (RBD_FEATURE_OBJECT_MAP |
+                            RBD_FEATURE_JOURNALING);
         }
         if ((features & RBD_FEATURE_OBJECT_MAP) != 0) {
           if ((new_features & RBD_FEATURE_FAST_DIFF) != 0) {

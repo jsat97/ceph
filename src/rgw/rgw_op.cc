@@ -362,12 +362,15 @@ int rgw_build_bucket_policies(RGWRados* store, struct req_state* s)
     s->bucket_owner = s->bucket_acl->get_owner();
 
     RGWZoneGroup zonegroup;
-    ret = store->get_zonegroup(s->bucket_info.zonegroup, zonegroup);
-    if (!ret) {
+    int r = store->get_zonegroup(s->bucket_info.zonegroup, zonegroup);
+    if (!r) {
       if (!zonegroup.endpoints.empty()) {
 	s->zonegroup_endpoint = zonegroup.endpoints.front();
       }
       s->zonegroup_name = zonegroup.get_name();
+    }
+    if (r < 0 && ret == 0) {
+      ret = r;
     }
 
     if (s->bucket_exists && !store->get_zonegroup().equals(s->bucket_info.zonegroup)) {
@@ -730,11 +733,12 @@ static int iterate_user_manifest_parts(CephContext * const cct,
                                        RGWRados * const store,
                                        const off_t ofs,
                                        const off_t end,
-                                       rgw_bucket& bucket,
+                                       RGWBucketInfo *pbucket_info,
                                        const string& obj_prefix,
                                        RGWAccessControlPolicy * const bucket_policy,
                                        uint64_t * const ptotal_len,
                                        uint64_t * const pobj_size,
+                                       string * const pobj_sum,
                                        int (*cb)(rgw_bucket& bucket,
                                                  const RGWObjEnt& ent,
                                                  RGWAccessControlPolicy * const bucket_policy,
@@ -743,6 +747,7 @@ static int iterate_user_manifest_parts(CephContext * const cct,
                                                  void *param),
                                        void * const cb_param)
 {
+  rgw_bucket& bucket = pbucket_info->bucket;
   uint64_t obj_ofs = 0, len_count = 0;
   bool found_start = false, found_end = false, handled_end = false;
   string delim;
@@ -751,22 +756,21 @@ static int iterate_user_manifest_parts(CephContext * const cct,
 
   utime_t start_time = ceph_clock_now(cct);
 
-  RGWRados::Bucket target(store, bucket);
+  RGWRados::Bucket target(store, *pbucket_info);
   RGWRados::Bucket::List list_op(&target);
 
   list_op.params.prefix = obj_prefix;
   list_op.params.delim = delim;
 
+  MD5 etag_sum;
   do {
 #define MAX_LIST_OBJS 100
     int r = list_op.list_objects(MAX_LIST_OBJS, &objs, NULL, &is_truncated);
-    if (r < 0)
+    if (r < 0) {
       return r;
+    }
 
-    vector<RGWObjEnt>::iterator viter;
-
-    for (viter = objs.begin(); viter != objs.end(); ++viter) {
-      RGWObjEnt& ent = *viter;
+    for (RGWObjEnt& ent : objs) {
       uint64_t cur_total_len = obj_ofs;
       uint64_t start_ofs = 0, end_ofs = ent.size;
 
@@ -776,6 +780,10 @@ static int iterate_user_manifest_parts(CephContext * const cct,
       }
 
       obj_ofs += ent.size;
+      if (pobj_sum) {
+        etag_sum.Update((const byte *)ent.etag.c_str(),
+                        ent.etag.length());
+      }
 
       if (!found_end && obj_ofs > (uint64_t)end) {
 	end_ofs = end - cur_total_len + 1;
@@ -807,6 +815,9 @@ static int iterate_user_manifest_parts(CephContext * const cct,
   if (pobj_size) {
     *pobj_size = obj_ofs;
   }
+  if (pobj_sum) {
+    complete_etag(etag_sum, pobj_sum);
+  }
 
   return 0;
 }
@@ -835,13 +846,10 @@ static int iterate_slo_parts(CephContext *cct,
                              void *cb_param)
 {
   bool found_start = false, found_end = false;
-  string delim;
-  vector<RGWObjEnt> objs;
 
   if (slo_parts.empty()) {
     return 0;
   }
-
 
   utime_t start_time = ceph_clock_now(cct);
 
@@ -924,9 +932,10 @@ int RGWGetObj::handle_user_manifest(const char *prefix)
 
   RGWAccessControlPolicy _bucket_policy(s->cct);
   RGWAccessControlPolicy *bucket_policy;
+  RGWBucketInfo bucket_info;
+  RGWBucketInfo *pbucket_info;
 
   if (bucket_name.compare(s->bucket.name) != 0) {
-    RGWBucketInfo bucket_info;
     map<string, bufferlist> bucket_attrs;
     RGWObjectCtx obj_ctx(store);
     int r = store->get_bucket_info(obj_ctx, s->user->user_id.tenant,
@@ -938,6 +947,7 @@ int RGWGetObj::handle_user_manifest(const char *prefix)
       return r;
     }
     bucket = bucket_info.bucket;
+    pbucket_info = &bucket_info;
     rgw_obj_key no_obj;
     bucket_policy = &_bucket_policy;
     r = read_policy(store, s, bucket_info, bucket_attrs, bucket_policy, bucket, no_obj);
@@ -947,13 +957,18 @@ int RGWGetObj::handle_user_manifest(const char *prefix)
     }
   } else {
     bucket = s->bucket;
+    pbucket_info = &s->bucket_info;
     bucket_policy = s->bucket_acl;
   }
 
-  /* dry run to find out total length */
+  /* dry run to find out:
+   * - total length (of the parts we are going to send to client),
+   * - overall DLO's content size,
+   * - md5 sum of overall DLO's content (for etag of Swift API). */
   int r = iterate_user_manifest_parts(s->cct, store, ofs, end,
-        bucket, obj_prefix, bucket_policy, &total_len, &s->obj_size,
-        NULL, NULL);
+        pbucket_info, obj_prefix, bucket_policy,
+        &total_len, &s->obj_size, &lo_etag,
+        nullptr /* cb */, nullptr /* cb arg */);
   if (r < 0) {
     return r;
   }
@@ -965,7 +980,8 @@ int RGWGetObj::handle_user_manifest(const char *prefix)
   }
 
   r = iterate_user_manifest_parts(s->cct, store, ofs, end,
-        bucket, obj_prefix, bucket_policy, NULL, NULL,
+        pbucket_info, obj_prefix, bucket_policy,
+        nullptr, nullptr, nullptr,
         get_obj_user_manifest_iterate_cb, (void *)this);
   if (r < 0) {
     return r;
@@ -992,13 +1008,15 @@ int RGWGetObj::handle_slo_manifest(bufferlist& bl)
 
   map<uint64_t, rgw_slo_part> slo_parts;
 
+  MD5 etag_sum;
   total_len = 0;
 
-  for (vector<rgw_slo_entry>::iterator iter = slo_info.entries.begin(); iter != slo_info.entries.end(); ++iter) {
-    string& path = iter->path;
-    int pos = path.find('/', 1); /* skip first / */
-    if (pos < 0)
+  for (const auto& entry : slo_info.entries) {
+    const string& path = entry.path;
+    const size_t pos = path.find('/', 1); /* skip first / */
+    if (pos == string::npos) {
       return -EINVAL;
+    }
 
     string bucket_name = path.substr(1, pos - 1);
     string obj_name = path.substr(pos + 1);
@@ -1007,7 +1025,7 @@ int RGWGetObj::handle_slo_manifest(bufferlist& bl)
     RGWAccessControlPolicy *bucket_policy;
 
     if (bucket_name.compare(s->bucket.name) != 0) {
-      map<string, RGWAccessControlPolicy *>::iterator piter = policies.find(bucket_name);
+      const auto& piter = policies.find(bucket_name);
       if (piter != policies.end()) {
         bucket_policy = piter->second;
         bucket = buckets[bucket_name];
@@ -1019,7 +1037,8 @@ int RGWGetObj::handle_slo_manifest(bufferlist& bl)
         map<string, bufferlist> bucket_attrs;
         RGWObjectCtx obj_ctx(store);
         int r = store->get_bucket_info(obj_ctx, s->user->user_id.tenant,
-              bucket_name, bucket_info, NULL, &bucket_attrs);
+                                       bucket_name, bucket_info, nullptr,
+                                       &bucket_attrs);
         if (r < 0) {
           ldout(s->cct, 0) << "could not get bucket info for bucket="
 			   << bucket_name << dendl;
@@ -1028,9 +1047,11 @@ int RGWGetObj::handle_slo_manifest(bufferlist& bl)
         bucket = bucket_info.bucket;
         rgw_obj_key no_obj;
         bucket_policy = &_bucket_policy;
-        r = read_policy(store, s, bucket_info, bucket_attrs, bucket_policy, bucket, no_obj);
+        r = read_policy(store, s, bucket_info, bucket_attrs, bucket_policy,
+                        bucket, no_obj);
         if (r < 0) {
-          ldout(s->cct, 0) << "failed to read bucket policy for bucket " << bucket << dendl;
+          ldout(s->cct, 0) << "failed to read bucket policy for bucket "
+                           << bucket << dendl;
           return r;
         }
         buckets[bucket_name] = bucket;
@@ -1045,8 +1066,8 @@ int RGWGetObj::handle_slo_manifest(bufferlist& bl)
     part.bucket_policy = bucket_policy;
     part.bucket = bucket;
     part.obj_name = obj_name;
-    part.size = iter->size_bytes;
-    part.etag = iter->etag;
+    part.size = entry.size_bytes;
+    part.etag = entry.etag;
     ldout(s->cct, 20) << "slo_part: ofs=" << ofs
                       << " bucket=" << part.bucket
                       << " obj=" << part.obj_name
@@ -1054,9 +1075,14 @@ int RGWGetObj::handle_slo_manifest(bufferlist& bl)
                       << " etag=" << part.etag
                       << dendl;
 
+    etag_sum.Update((const byte *)entry.etag.c_str(),
+                    entry.etag.length());
+
     slo_parts[total_len] = part;
     total_len += part.size;
   }
+
+  complete_etag(etag_sum, &lo_etag);
 
   s->obj_size = slo_info.total_size;
   ldout(s->cct, 20) << "s->obj_size=" << s->obj_size << dendl;
@@ -1310,8 +1336,9 @@ void RGWListBuckets::execute()
     }
 
     op_ret = rgw_read_user_buckets(store, s->user->user_id, buckets,
-				   marker, end_marker, read_count,
-				   should_get_stats(), &is_truncated);
+                                   marker, end_marker, read_count,
+                                   should_get_stats(), &is_truncated,
+                                   get_default_max());
     if (op_ret < 0) {
       /* hmm.. something wrong here.. the user was authenticated, so it
          should exist */
@@ -1626,7 +1653,7 @@ void RGWListBucket::execute()
     }
   }
 
-  RGWRados::Bucket target(store, s->bucket);
+  RGWRados::Bucket target(store, s->bucket_info);
   if (shard_id >= 0) {
     target.set_shard_id(shard_id);
   }
@@ -1809,7 +1836,7 @@ void RGWCreateBucket::execute()
     op_ret = store->select_bucket_placement(*(s->user), zonegroup_id,
 					    placement_rule,
 					    s->bucket_tenant, s->bucket_name,
-					    bucket, &selected_placement_rule);
+					    bucket, &selected_placement_rule, nullptr);
     if (selected_placement_rule != s->bucket_info.placement_rule) {
       op_ret = -EEXIST;
       return;
@@ -2986,8 +3013,12 @@ int RGWCopyObj::verify_permission()
     /* will only happen in intra region sync where the source and dest bucket is the same */
     op_ret = store->get_bucket_instance_info(obj_ctx, s->bucket_instance_id, src_bucket_info, NULL, &src_attrs);
   }
-  if (op_ret < 0)
+  if (op_ret < 0) {
+    if (op_ret == -ENOENT) {
+      op_ret = -ERR_NO_SUCH_BUCKET;
+    }
     return op_ret;
+  }
 
   src_bucket = src_bucket_info.bucket;
 
@@ -3019,8 +3050,12 @@ int RGWCopyObj::verify_permission()
   } else {
     op_ret = store->get_bucket_info(obj_ctx, dest_tenant_name, dest_bucket_name,
 				    dest_bucket_info, NULL, &dest_attrs);
-    if (op_ret < 0)
+    if (op_ret < 0) {
+      if (op_ret == -ENOENT) {
+        op_ret = -ERR_NO_SUCH_BUCKET;
+      }
       return op_ret;
+    }
   }
 
   dest_bucket = dest_bucket_info.bucket;
@@ -4077,7 +4112,7 @@ void RGWListBucketMultiparts::execute()
   }
   marker_meta = marker.get_meta();
 
-  RGWRados::Bucket target(store, s->bucket);
+  RGWRados::Bucket target(store, s->bucket_info);
   RGWRados::Bucket::List list_op(&target);
 
   list_op.params.prefix = prefix;

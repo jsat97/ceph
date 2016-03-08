@@ -195,7 +195,7 @@ OPTION(ms_inject_delay_probability, OPT_DOUBLE, 0) // range [0, 1]
 OPTION(ms_inject_internal_delays, OPT_DOUBLE, 0)   // seconds
 OPTION(ms_dump_on_send, OPT_BOOL, false)           // hexdump msg to log on send
 OPTION(ms_dump_corrupt_message_level, OPT_INT, 1)  // debug level to hexdump undecodeable messages at
-OPTION(ms_async_op_threads, OPT_INT, 2)
+OPTION(ms_async_op_threads, OPT_INT, 3)
 OPTION(ms_async_set_affinity, OPT_BOOL, true)
 // example: ms_async_affinity_cores = 0,1
 // The number of coreset is expected to equal to ms_async_op_threads, otherwise
@@ -454,8 +454,7 @@ OPTION(mds_log_pause, OPT_BOOL, false)
 OPTION(mds_log_skip_corrupt_events, OPT_BOOL, false)
 OPTION(mds_log_max_events, OPT_INT, -1)
 OPTION(mds_log_events_per_segment, OPT_INT, 1024)
-OPTION(mds_log_segment_size, OPT_INT, 0)  // segment size for mds log,
-	      // defaults to g_default_file_layout.fl_object_size (4MB)
+OPTION(mds_log_segment_size, OPT_INT, 0)  // segment size for mds log, default to default file_layout_t
 OPTION(mds_log_max_segments, OPT_U32, 30)
 OPTION(mds_log_max_expiring, OPT_INT, 20)
 OPTION(mds_bal_sample_interval, OPT_FLOAT, 3.0)  // every 5 seconds
@@ -911,7 +910,7 @@ OPTION(bluestore_max_dir_size, OPT_U32, 1000000)
 OPTION(bluestore_min_alloc_size, OPT_U32, 64*1024)
 OPTION(bluestore_onode_map_size, OPT_U32, 1024)   // onodes per collection
 OPTION(bluestore_cache_tails, OPT_BOOL, true)   // cache tail blocks in Onode
-OPTION(bluestore_backend, OPT_STR, "rocksdb")
+OPTION(bluestore_kvbackend, OPT_STR, "rocksdb")
 OPTION(bluestore_rocksdb_options, OPT_STR, "compression=kNoCompression,max_write_buffer_number=16,min_write_buffer_number_to_merge=3,recycle_log_file_num=16")
 OPTION(bluestore_fsck_on_mount, OPT_BOOL, false)
 OPTION(bluestore_fsck_on_umount, OPT_BOOL, false)
@@ -1026,10 +1025,25 @@ OPTION(filestore_xfs_extsize, OPT_BOOL, false)
 OPTION(filestore_journal_parallel, OPT_BOOL, false)
 OPTION(filestore_journal_writeahead, OPT_BOOL, false)
 OPTION(filestore_journal_trailing, OPT_BOOL, false)
-OPTION(filestore_queue_max_ops, OPT_INT, 50)
-OPTION(filestore_queue_max_bytes, OPT_INT, 100 << 20)
-OPTION(filestore_queue_committing_max_ops, OPT_INT, 500)        // this is ON TOP of filestore_queue_max_*
-OPTION(filestore_queue_committing_max_bytes, OPT_INT, 100 << 20) //  "
+OPTION(filestore_queue_max_ops, OPT_U64, 50)
+OPTION(filestore_queue_max_bytes, OPT_U64, 100 << 20)
+
+OPTION(filestore_caller_concurrency, OPT_INT, 10)
+
+/// Expected filestore throughput in B/s
+OPTION(filestore_expected_throughput_bytes, OPT_DOUBLE, 100 << 20)
+/// Expected filestore throughput in ops/s
+OPTION(filestore_expected_throughput_ops, OPT_DOUBLE, 100)
+
+/// Filestore max delay multiple (probably don't need to change)
+OPTION(filestore_queue_max_delay_multiple, OPT_DOUBLE, 10)
+/// Filestore max delay multiple (probably don't need to change)
+OPTION(filestore_queue_high_delay_multiple, OPT_DOUBLE, 2)
+
+/// Use above to inject delays intended to keep the op queue between low and high
+OPTION(filestore_queue_low_threshhold, OPT_DOUBLE, 0.2)
+OPTION(filestore_queue_high_threshhold, OPT_DOUBLE, 0.8)
+
 OPTION(filestore_op_threads, OPT_INT, 2)
 OPTION(filestore_op_thread_timeout, OPT_INT, 60)
 OPTION(filestore_op_thread_suicide_timeout, OPT_INT, 180)
@@ -1051,6 +1065,7 @@ OPTION(filestore_debug_verify_split, OPT_BOOL, false)
 OPTION(journal_dio, OPT_BOOL, true)
 OPTION(journal_aio, OPT_BOOL, true)
 OPTION(journal_force_aio, OPT_BOOL, false)
+OPTION(journal_block_size, OPT_INT, 4096)
 
 // max bytes to search ahead in journal searching for corruption
 OPTION(journal_max_corrupt_search, OPT_U64, 10<<20)
@@ -1058,8 +1073,16 @@ OPTION(journal_block_align, OPT_BOOL, true)
 OPTION(journal_write_header_frequency, OPT_U64, 0)
 OPTION(journal_max_write_bytes, OPT_INT, 10 << 20)
 OPTION(journal_max_write_entries, OPT_INT, 100)
-OPTION(journal_queue_max_ops, OPT_INT, 300)
-OPTION(journal_queue_max_bytes, OPT_INT, 32 << 20)
+
+/// Target range for journal fullness
+OPTION(journal_throttle_low_threshhold, OPT_DOUBLE, 0.5)
+OPTION(journal_throttle_high_threshhold, OPT_DOUBLE, 0.8)
+
+/// Multiple over expected at high_threshhold (probably don't need to change)
+OPTION(journal_throttle_high_multiple, OPT_DOUBLE, 2)
+/// Multiple over expected at max (probably don't need to change)
+OPTION(journal_throttle_max_multiple, OPT_DOUBLE, 10)
+
 OPTION(journal_align_min_size, OPT_INT, 64 << 10)  // align data payloads >= this.
 OPTION(journal_replay_from, OPT_INT, 0)
 OPTION(journal_zero_on_create, OPT_BOOL, false)
@@ -1118,9 +1141,11 @@ OPTION(rbd_default_format, OPT_INT, 2)
 OPTION(rbd_default_order, OPT_INT, 22)
 OPTION(rbd_default_stripe_count, OPT_U64, 0) // changing requires stripingv2 feature
 OPTION(rbd_default_stripe_unit, OPT_U64, 0) // changing to non-object size requires stripingv2 feature
-OPTION(rbd_default_features, OPT_INT, 3) // only applies to format 2 images
-					 // +1 for layering, +2 for stripingv2,
-					 // +4 for exclusive lock, +8 for object map
+OPTION(rbd_default_features, OPT_INT, 61)   // only applies to format 2 images
+					    // +1 for layering, +2 for stripingv2,
+					    // +4 for exclusive lock, +8 for object map
+					    // +16 for fast-diff, +32 for deep-flatten,
+					    // +64 for journaling
 
 OPTION(rbd_default_map_options, OPT_STR, "") // default rbd map -o / --options
 
@@ -1192,6 +1217,7 @@ OPTION(rgw_keystone_api_version, OPT_INT, 2) // Version of Keystone API to use (
 OPTION(rgw_keystone_accepted_roles, OPT_STR, "Member, admin")  // roles required to serve requests
 OPTION(rgw_keystone_token_cache_size, OPT_INT, 10000)  // max number of entries in keystone token cache
 OPTION(rgw_keystone_revocation_interval, OPT_INT, 15 * 60)  // seconds between tokens revocation check
+OPTION(rgw_keystone_verify_ssl, OPT_BOOL, true) // should we try to verify keystone's ssl
 OPTION(rgw_s3_auth_use_rados, OPT_BOOL, true)  // should we try to use the internal credentials for s3?
 OPTION(rgw_s3_auth_use_keystone, OPT_BOOL, false)  // should we try to use keystone for s3?
 OPTION(rgw_admin_entry, OPT_STR, "admin")  // entry point for which a url is considered an admin request

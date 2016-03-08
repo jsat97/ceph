@@ -455,8 +455,7 @@ static void get_wal_key(uint64_t seq, string *out)
 
 void BlueStore::Enode::put()
 {
-  int final = --nref;
-  if (final == 0) {
+  if (--nref == 0) {
     dout(20) << __func__ << " removing self from set " << enode_set << dendl;
     enode_set->uset.erase(*this);
     delete this;
@@ -708,9 +707,6 @@ BlueStore::OnodeRef BlueStore::Collection::get_onode(
 
     // new
     on = new Onode(oid, key);
-    on->dirty = true;
-    if (g_conf->bluestore_debug_misc && !create)
-      on->dirty = false;
   } else {
     // loaded
     assert(r >=0);
@@ -744,7 +740,6 @@ BlueStore::BlueStore(CephContext *cct, const string& path)
     bluefs(NULL),
     bluefs_shared_bdev(0),
     db(NULL),
-    fs(NULL),
     bdev(NULL),
     fm(NULL),
     alloc(NULL),
@@ -836,9 +831,6 @@ int BlueStore::_open_path()
 	 << dendl;
     return r;
   }
-  assert(fs == NULL);
-  fs = FS::create_by_fd(path_fd);
-  dout(1) << __func__ << " using fs driver '" << fs->get_name() << "'" << dendl;
   return 0;
 }
 
@@ -846,8 +838,6 @@ void BlueStore::_close_path()
 {
   VOID_TEMP_FAILURE_RETRY(::close(path_fd));
   path_fd = -1;
-  delete fs;
-  fs = NULL;
 }
 
 int BlueStore::_write_bdev_label(string path, bluestore_bdev_label_t label)
@@ -1132,7 +1122,7 @@ int BlueStore::_open_db(bool create)
 
   string kv_backend;
   if (create) {
-    kv_backend = g_conf->bluestore_backend;
+    kv_backend = g_conf->bluestore_kvbackend;
   } else {
     r = read_meta("kv_backend", &kv_backend);
     if (r < 0) {
@@ -1306,16 +1296,18 @@ int BlueStore::_open_db(bool create)
     }
 
     // wal_dir, too!
-    char walfn[PATH_MAX];
-    snprintf(walfn, sizeof(walfn), "%s/db.wal", path.c_str());
-    r = ::mkdir(walfn, 0755);
-    if (r < 0)
-      r = -errno;
-    if (r < 0 && r != -EEXIST) {
-      derr << __func__ << " failed to create " << walfn
-	   << ": " << cpp_strerror(r)
-	   << dendl;
-      return r;
+    if (g_conf->rocksdb_separate_wal_dir) {
+      char walfn[PATH_MAX];
+      snprintf(walfn, sizeof(walfn), "%s/db.wal", path.c_str());
+      r = ::mkdir(walfn, 0755);
+      if (r < 0)
+	r = -errno;
+      if (r < 0 && r != -EEXIST) {
+	derr << __func__ << " failed to create " << walfn
+	  << ": " << cpp_strerror(r)
+	  << dendl;
+	return r;
+      }
     }
   }
 
@@ -1578,7 +1570,7 @@ int BlueStore::_setup_block_symlink_or_file(
   dout(20) << __func__ << " name " << name << " path " << epath
 	   << " size " << size << " create=" << (int)create << dendl;
   int r = 0;
-  unsigned flags = O_RDWR;
+  int flags = O_RDWR;
   if (create)
     flags |= O_CREAT;
   if (epath.length()) {
@@ -1694,7 +1686,7 @@ int BlueStore::mkfs()
     } else {
       dout(1) << __func__ << " using provided fsid " << fsid << dendl;
     }
-    // we'll write it last.
+    // we'll write it later.
   } else {
     if (!fsid.is_zero() && fsid != old_fsid) {
       derr << __func__ << " on-disk fsid " << old_fsid
@@ -1710,16 +1702,18 @@ int BlueStore::mkfs()
 				   g_conf->bluestore_block_create);
   if (r < 0)
     goto out_close_fsid;
-  r = _setup_block_symlink_or_file("block.wal", g_conf->bluestore_block_wal_path,
-				   g_conf->bluestore_block_wal_size,
-				   g_conf->bluestore_block_wal_create);
-  if (r < 0)
-    goto out_close_fsid;
-  r = _setup_block_symlink_or_file("block.db", g_conf->bluestore_block_db_path,
-				   g_conf->bluestore_block_db_size,
-				   g_conf->bluestore_block_db_create);
-  if (r < 0)
-    goto out_close_fsid;
+  if (g_conf->bluestore_bluefs) {
+    r = _setup_block_symlink_or_file("block.wal", g_conf->bluestore_block_wal_path,
+	g_conf->bluestore_block_wal_size,
+	g_conf->bluestore_block_wal_create);
+    if (r < 0)
+      goto out_close_fsid;
+    r = _setup_block_symlink_or_file("block.db", g_conf->bluestore_block_db_path,
+	g_conf->bluestore_block_db_size,
+	g_conf->bluestore_block_db_create);
+    if (r < 0)
+      goto out_close_fsid;
+  }
 
   r = _open_bdev(true);
   if (r < 0)
@@ -1776,7 +1770,7 @@ int BlueStore::mkfs()
     db->submit_transaction_sync(t);
   }
 
-  r = write_meta("kv_backend", g_conf->bluestore_backend);
+  r = write_meta("kv_backend", g_conf->bluestore_kvbackend);
   if (r < 0)
     goto out_close_alloc;
   r = write_meta("bluefs", stringify((int)g_conf->bluestore_bluefs));
@@ -1813,6 +1807,20 @@ int BlueStore::mkfs()
 int BlueStore::mount()
 {
   dout(1) << __func__ << " path " << path << dendl;
+
+  {
+    string type;
+    int r = read_meta("type", &type);
+    if (r < 0) {
+      derr << __func__ << " failed to load os-type: " << cpp_strerror(r) << dendl;
+      return r;
+    }
+
+    if (type != "bluestore") {
+      derr << __func__ << " expected bluestore, but type is " << type << dendl;
+      return -EIO;
+    }
+  }
 
   if (g_conf->bluestore_fsck_on_mount) {
     int rc = fsck();
@@ -2334,7 +2342,7 @@ void BlueStore::_sync()
 {
   dout(10) << __func__ << dendl;
 
-  // flush aios in flght
+  // flush aios in flight
   bdev->flush();
 
   std::unique_lock<std::mutex> l(kv_lock);
@@ -2669,7 +2677,6 @@ int BlueStore::_do_read(
     bl.append_zero(x_len);
     offset += x_len;
     length -= x_len;
-    continue;
   }
   r = bl.length();
 
@@ -2781,7 +2788,6 @@ int BlueStore::fiemap(
     }
     offset += x_len;
     len -= x_len;
-    continue;
   }
 
  out:
@@ -4227,7 +4233,7 @@ void BlueStore::_txc_aio_submit(TransContext *txc)
   bdev->aio_submit(&txc->ioc);
 }
 
-int BlueStore::_txc_add_transaction(TransContext *txc, Transaction *t)
+void BlueStore::_txc_add_transaction(TransContext *txc, Transaction *t)
 {
   Transaction::iterator i = t->begin();
 
@@ -4480,8 +4486,19 @@ int BlueStore::_txc_add_transaction(TransContext *txc, Transaction *t)
       {
 	assert(op->cid == op->dest_cid);
 	const ghobject_t& noid = i.get_oid(op->dest_oid);
+	OnodeRef no = c->get_onode(noid, false);
+	r = _rename(txc, c, o, no, noid);
+	o.reset();
+      }
+      break;
+
+    case Transaction::OP_TRY_RENAME:
+      {
+	const ghobject_t& noid = i.get_oid(op->dest_oid);
 	OnodeRef no = c->get_onode(noid, true);
 	r = _rename(txc, c, o, no, noid);
+	if (r == -ENOENT)
+	  r = 0;
 	o.reset();
       }
       break;
@@ -4580,8 +4597,6 @@ int BlueStore::_txc_add_transaction(TransContext *txc, Transaction *t)
       }
     }
   }
-
-  return 0;
 }
 
 
@@ -5044,7 +5059,7 @@ int BlueStore::_do_allocate(
   bool shared_head = false;
   bool shared_tail = false;
   uint64_t orig_end = orig_offset + orig_length;
-  if (orig_offset / min_alloc_size == orig_end / min_alloc_size) {
+  if (orig_offset / min_alloc_size == (orig_end - 1)/ min_alloc_size) {
     // we fall within the same block
     offset = orig_offset - orig_offset % min_alloc_size;
     length = 0;
@@ -5089,21 +5104,23 @@ int BlueStore::_do_allocate(
     }
 
     // include head?
-    bp = o->onode.find_extent(orig_offset);
     if (head) {
       if (allow_overlay && _can_overlay_write(o, head)) {
 	dout(20) << "  head " << head << " will be captured by overlay" << dendl;
-      } else if (bp == o->onode.block_map.end()) {
-	dout(20) << "  head " << head << " not yet allocated" << dendl;
-	offset -= min_alloc_size;
-	length += min_alloc_size;
-      } else if (bp->second.has_flag(bluestore_extent_t::FLAG_SHARED)) {
-	dout(20) << "  head " << head << " shared" << dendl;
-	offset -= min_alloc_size;
-	length += min_alloc_size;
-	shared_head = true;
       } else {
-	dout(20) << "  head " << head << " will presumably WAL" << dendl;
+        bp = o->onode.find_extent(orig_offset);
+        if (bp == o->onode.block_map.end()) {
+          dout(20) << "  head " << head << " not yet allocated" << dendl;
+          offset -= min_alloc_size;
+          length += min_alloc_size;
+        } else if (bp->second.has_flag(bluestore_extent_t::FLAG_SHARED)) {
+          dout(20) << "  head " << head << " shared" << dendl;
+          offset -= min_alloc_size;
+          length += min_alloc_size;
+          shared_head = true;
+        } else {
+          dout(20) << "  head " << head << " will presumably WAL" << dendl;
+        }
       }
     }
   }
@@ -5255,32 +5272,24 @@ int BlueStore::_do_allocate(
 			      &e.offset, &e.length);
       assert(r == 0);
       assert(e.length <= length);  // bc length is a multiple of min_alloc_size
-      if (offset == alloc_start) {
-	if (cow_head_op) {
-	  // we set the COW flag to indicate that all or part of this new extent
-	  // will be copied from the previous allocation.
-	  e.flags |= bluestore_extent_t::FLAG_COW_HEAD;
-	}
-	if (cow_head_op) {
-	  cow_head_op->extent.offset = e.offset;
-	  dout(10) << __func__ << "  final head cow op extent "
-		   << cow_head_op->extent << dendl;
-	}
+      if (offset == alloc_start && cow_head_op) {
+        // we set the COW flag to indicate that all or part of this new extent
+        // will be copied from the previous allocation.
+        e.flags |= bluestore_extent_t::FLAG_COW_HEAD;
+        cow_head_op->extent.offset = e.offset;
+        dout(10) << __func__ << "  final head cow op extent "
+                 << cow_head_op->extent << dendl;
       }
-      if (e.length == length) {
-	if (cow_tail_op) {
-	  // we set the COW flag to indicate that all or part of this new extent
-	  // will be copied from the previous allocation.
-	  e.flags |= bluestore_extent_t::FLAG_COW_TAIL;
-	}
-	if (cow_tail_op) {
-	  // extent.offset is the logical object offset
-	  assert(cow_tail_op->extent.offset >= offset);
-	  assert(cow_tail_op->extent.end() <= offset + length);
-	  cow_tail_op->extent.offset += e.offset - offset;
-	  dout(10) << __func__ << "  final tail cow op extent "
-		   << cow_tail_op->extent << dendl;
-	}
+      if (e.length == length && cow_tail_op) {
+        // we set the COW flag to indicate that all or part of this new extent
+        // will be copied from the previous allocation.
+        e.flags |= bluestore_extent_t::FLAG_COW_TAIL;
+        // extent.offset is the logical object offset
+        assert(cow_tail_op->extent.offset >= offset);
+        assert(cow_tail_op->extent.end() <= offset + length);
+        cow_tail_op->extent.offset += e.offset - offset;
+        dout(10) << __func__ << "  final tail cow op extent "
+                 << cow_tail_op->extent << dendl;
       }
       txc->allocated.insert(e.offset, e.length);
       o->onode.block_map[offset] = e;
@@ -5318,7 +5327,6 @@ int BlueStore::_do_write(
 	   << " bytes in " << o->onode.block_map.size()
 	   << " extents" << dendl;
   _dump_onode(o);
-  o->exists = true;
 
   if (orig_length == 0) {
     return 0;
@@ -5530,6 +5538,7 @@ int BlueStore::_do_write(
 	uint64_t x_off = offset - bp->first;
 	dout(20) << __func__ << " write " << offset << "~" << length
 		 << " x_off " << x_off << dendl;
+	_do_overlay_trim(txc, o, offset, length);
 	bdev->aio_write(bp->second.offset + x_off, bl, &txc->ioc, buffered);
 	bp->second.clear_flag(bluestore_extent_t::FLAG_UNWRITTEN);
 	bp->second.clear_flag(bluestore_extent_t::FLAG_COW_HEAD);
@@ -5615,6 +5624,7 @@ int BlueStore::_write(TransContext *txc,
   dout(15) << __func__ << " " << c->cid << " " << o->oid
 	   << " " << offset << "~" << length
 	   << dendl;
+  o->exists = true;
   _assign_nid(txc, o);
   int r = _do_write(txc, c, o, offset, length, bl, fadvise_flags);
   txc->write_onode(o);
@@ -5810,7 +5820,9 @@ int BlueStore::_do_truncate(
       uint64_t x_off = old_size - bp->first;
       uint64_t x_len = MIN(ROUND_UP_TO(offset, block_size), x_end) - old_size;
       if (bp->second.has_flag(bluestore_extent_t::FLAG_SHARED)) {
-	_do_write_zero(txc, c, o, old_size, x_len);
+        int r = _do_write_zero(txc, c, o, old_size, x_len);
+        if (r < 0)
+          return r;
 	o->onode.size = offset; // we (maybe) just wrote past eof; reset size
       } else {
 	bluestore_wal_op_t *op = _get_wal_op(txc, o);
@@ -5828,7 +5840,9 @@ int BlueStore::_do_truncate(
     if (bp != o->onode.block_map.end()) {
       uint64_t z_len = block_size - offset % block_size;
       if (bp->second.has_flag(bluestore_extent_t::FLAG_SHARED)) {
-	_do_write_zero(txc, c, o, offset, z_len);
+        int r = _do_write_zero(txc, c, o, offset, z_len);
+        if (r < 0)
+          return r;
 	o->onode.size = offset; // we just wrote past eof; reset size
       } else {
 	bluestore_wal_op_t *op = _get_wal_op(txc, o);
@@ -5903,7 +5917,9 @@ int BlueStore::_do_remove(
   CollectionRef& c,
   OnodeRef o)
 {
-  _do_truncate(txc, c, o, 0);
+  int r = _do_truncate(txc, c, o, 0);
+  if (r < 0)
+    return r;
   if (o->onode.omap_head) {
     _do_omap_clear(txc, o->onode.omap_head);
   }
@@ -5974,8 +5990,14 @@ int BlueStore::_rmattr(TransContext *txc,
   dout(15) << __func__ << " " << c->cid << " " << o->oid
 	   << " " << name << dendl;
   int r = 0;
+  map<string, bufferptr>::iterator it = o->onode.attrs.find(name);
+  if (it == o->onode.attrs.end())
+    goto out;
+
   o->onode.attrs.erase(name);
   txc->write_onode(o);
+
+ out:
   dout(10) << __func__ << " " << c->cid << " " << o->oid
 	   << " " << name << " = " << r << dendl;
   return r;
@@ -5987,8 +6009,14 @@ int BlueStore::_rmattrs(TransContext *txc,
 {
   dout(15) << __func__ << " " << c->cid << " " << o->oid << dendl;
   int r = 0;
+
+  if (o->onode.attrs.empty())
+    goto out;
+
   o->onode.attrs.clear();
   txc->write_onode(o);
+
+ out:
   dout(10) << __func__ << " " << c->cid << " " << o->oid << " = " << r << dendl;
   return r;
 }
@@ -6303,8 +6331,6 @@ int BlueStore::_rename(TransContext *txc,
 	   << new_oid << dendl;
   int r;
   ghobject_t old_oid = oldo->oid;
-  bufferlist bl;
-  string old_key, new_key;
 
   if (newo && newo->exists) {
     // destination object already exists, remove it first

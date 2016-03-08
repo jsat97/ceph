@@ -35,7 +35,6 @@
 #include "common/WorkQueue.h"
 #include "common/perf_counters.h"
 #include "os/ObjectStore.h"
-#include "os/fs/FS.h"
 #include "kv/KeyValueDB.h"
 
 #include "bluestore_types.h"
@@ -136,7 +135,6 @@ public:
     EnodeRef enode;  ///< ref to Enode [optional]
 
     bluestore_onode_t onode;  ///< metadata stored as value in kv store
-    bool dirty;     // ???
     bool exists;
 
     std::mutex flush_lock;  ///< protect flush_txns
@@ -150,7 +148,6 @@ public:
       : nref(0),
 	oid(o),
 	key(k),
-	dirty(false),
 	exists(false) {
     }
 
@@ -498,7 +495,6 @@ private:
   BlueFS *bluefs;
   unsigned bluefs_shared_bdev;  ///< which bluefs bdev we are sharing
   KeyValueDB *db;
-  FS *fs;
   BlockDevice *bdev;
   FreelistManager *fm;
   Allocator *alloc;
@@ -588,7 +584,7 @@ private:
   void _txc_release(TransContext *txc, CollectionRef& c, OnodeRef& onode,
 		    uint64_t offset, uint64_t length,
 		    bool shared);
-  int _txc_add_transaction(TransContext *txc, Transaction *t);
+  void _txc_add_transaction(TransContext *txc, Transaction *t);
   int _txc_finalize(OpSequencer *osr, TransContext *txc);
   void _txc_state_proc(TransContext *txc);
   void _txc_aio_submit(TransContext *txc);
@@ -627,41 +623,41 @@ public:
   BlueStore(CephContext *cct, const string& path);
   ~BlueStore();
 
-  string get_type() {
+  string get_type() override {
     return "bluestore";
   }
 
-  bool needs_journal() { return false; };
-  bool wants_journal() { return false; };
-  bool allows_journal() { return false; };
+  bool needs_journal() override { return false; };
+  bool wants_journal() override { return false; };
+  bool allows_journal() override { return false; };
 
   static int get_block_device_fsid(const string& path, uuid_d *fsid);
 
-  bool test_mount_in_use();
+  bool test_mount_in_use() override;
 
-  int mount();
-  int umount();
+  int mount() override;
+  int umount() override;
   void _sync();
 
-  int fsck();
+  int fsck() override;
 
-  unsigned get_max_object_name_length() {
+  unsigned get_max_object_name_length() override {
     return 4096;
   }
-  unsigned get_max_attr_name_length() {
+  unsigned get_max_attr_name_length() override {
     return 256;  // arbitrary; there is no real limit internally
   }
 
-  int mkfs();
-  int mkjournal() {
+  int mkfs() override;
+  int mkjournal() override {
     return 0;
   }
 
 public:
-  int statfs(struct statfs *buf);
+  int statfs(struct statfs *buf) override;
 
-  bool exists(const coll_t& cid, const ghobject_t& oid);
-  bool exists(CollectionHandle &c, const ghobject_t& oid);
+  bool exists(const coll_t& cid, const ghobject_t& oid) override;
+  bool exists(CollectionHandle &c, const ghobject_t& oid) override;
   int stat(
     const coll_t& cid,
     const ghobject_t& oid,
@@ -714,9 +710,9 @@ public:
 
   CollectionHandle open_collection(const coll_t &c) override;
 
-  bool collection_exists(const coll_t& c);
-  bool collection_empty(const coll_t& c);
-  int collection_bits(const coll_t& c);
+  bool collection_exists(const coll_t& c) override;
+  bool collection_empty(const coll_t& c) override;
+  int collection_bits(const coll_t& c) override;
 
   int collection_list(const coll_t& cid, ghobject_t start, ghobject_t end,
 		      bool sort_bitwise, int max,
@@ -762,7 +758,7 @@ public:
     CollectionHandle &c,              ///< [in] Collection containing oid
     const ghobject_t &oid, ///< [in] Object containing omap
     set<string> *keys      ///< [out] Keys defined on oid
-    );
+    ) override;
 
   /// Get key values
   int omap_get_values(
@@ -801,14 +797,14 @@ public:
     const ghobject_t &oid  ///< [in] object
     ) override;
 
-  void set_fsid(uuid_d u) {
+  void set_fsid(uuid_d u) override {
     fsid = u;
   }
-  uuid_d get_fsid() {
+  uuid_d get_fsid() override {
     return fsid;
   }
 
-  objectstore_perf_stat_t get_cur_stats() {
+  objectstore_perf_stat_t get_cur_stats() override {
     return objectstore_perf_stat_t();
   }
 
@@ -816,7 +812,7 @@ public:
     Sequencer *osr,
     vector<Transaction>& tls,
     TrackedOpRef op = TrackedOpRef(),
-    ThreadPool::TPHandle *handle = NULL);
+    ThreadPool::TPHandle *handle = NULL) override;
 
 private:
   // --------------------------------------------------------

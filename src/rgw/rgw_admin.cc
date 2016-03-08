@@ -244,12 +244,6 @@ int usage()
   return 1;
 }
 
-void usage_exit()
-{
-  _usage();
-  exit(1);
-}
-
 enum {
   OPT_NO_CMD = 0,
   OPT_USER_CREATE,
@@ -1203,9 +1197,6 @@ int check_obj_tail_locator_underscore(RGWBucketInfo& bucket_info, rgw_obj& obj, 
   f->dump_string("instance", key.instance);
   f->close_section();
 
-  string oid;
-  string locator;
-
   bool needs_fixing;
   string status;
 
@@ -1255,7 +1246,7 @@ int do_check_object_locator(const string& tenant_name, const string& bucket_name
   map<string, bool> common_prefixes;
   string ns;
 
-  RGWRados::Bucket target(store, bucket);
+  RGWRados::Bucket target(store, bucket_info);
   RGWRados::Bucket::List list_op(&target);
 
   string marker;
@@ -1277,7 +1268,6 @@ int do_check_object_locator(const string& tenant_name, const string& bucket_name
 
     count += result.size();
 
-    list<rgw_obj> objs;
     for (vector<RGWObjEnt>::iterator iter = result.begin(); iter != result.end(); ++iter) {
       rgw_obj_key key = iter->key;
       rgw_obj obj(bucket, key);
@@ -1563,6 +1553,20 @@ static int do_period_pull(const string& remote, const string& url, const string&
     cerr << "Error storing period " << period->get_id() << ": " << cpp_strerror(ret) << std::endl;
   }
 
+  return 0;
+}
+
+static int read_current_period_id(RGWRados* store, const std::string& realm_id,
+                                  const std::string& realm_name,
+                                  std::string* period_id)
+{
+  RGWRealm realm(realm_id, realm_name);
+  int ret = realm.init(g_ceph_context, store);
+  if (ret < 0) {
+    std::cerr << "failed to read realm: " << cpp_strerror(-ret) << std::endl;
+    return ret;
+  }
+  *period_id = realm.get_current_period();
   return 0;
 }
 
@@ -2147,19 +2151,12 @@ int main(int argc, char **argv)
       break;
     case OPT_PERIOD_GET_CURRENT:
       {
-	RGWRealm realm(realm_id, realm_name);
-	int ret = realm.init(g_ceph_context, store);
-	if (ret < 0 ) {
-	  cerr << "Error initializing realm " << cpp_strerror(-ret) << std::endl;
-	  return ret;
-	}
-	string current_id = realm.get_current_period();
+        int ret = read_current_period_id(store, realm_id, realm_name, &period_id);
 	if (ret < 0) {
-	  cerr << "Error reading current period:" << cpp_strerror(-ret) << std::endl;
 	  return ret;
 	}
 	formatter->open_object_section("period_get_current");
-	encode_json("current_period", current_id, formatter);
+	encode_json("current_period", period_id, formatter);
 	formatter->close_section();
 	formatter->flush(cout);
       }
@@ -2292,21 +2289,18 @@ int main(int argc, char **argv)
       break;
     case OPT_REALM_LIST_PERIODS:
       {
-	RGWRealm realm(realm_id, realm_name);
-	int ret = realm.init(g_ceph_context, store);
+        int ret = read_current_period_id(store, realm_id, realm_name, &period_id);
 	if (ret < 0) {
-	  cerr << "realm.init failed: " << cpp_strerror(-ret) << std::endl;
 	  return -ret;
 	}
-	string current_period = realm.get_current_period();
 	list<string> periods;
-	ret = store->list_periods(current_period, periods);
+	ret = store->list_periods(period_id, periods);
 	if (ret < 0) {
 	  cerr << "list periods failed: " << cpp_strerror(-ret) << std::endl;
 	  return -ret;
 	}	
 	formatter->open_object_section("realm_periods_list");
-	encode_json("current_period", current_period, formatter);
+	encode_json("current_period", period_id, formatter);
 	encode_json("periods", periods, formatter);
 	formatter->close_section();
 	formatter->flush(cout);
@@ -3496,7 +3490,7 @@ int main(int argc, char **argv)
       map<string, bool> common_prefixes;
       string ns;
 
-      RGWRados::Bucket target(store, bucket);
+      RGWRados::Bucket target(store, bucket_info);
       RGWRados::Bucket::List list_op(&target);
 
       list_op.params.prefix = prefix;
@@ -4393,14 +4387,10 @@ next:
     int i = (specified_shard_id ? shard_id : 0);
 
     if (period_id.empty()) {
-      // read current_period from the realm
-      RGWRealm realm(realm_id, realm_name);
-      ret = realm.init(g_ceph_context, store);
+      int ret = read_current_period_id(store, realm_id, realm_name, &period_id);
       if (ret < 0) {
-        std::cerr << "failed to init realm: " << cpp_strerror(-ret) << std::endl;
         return -ret;
       }
-      period_id = realm.get_current_period();
       std::cerr << "No --period given, using current period="
           << period_id << std::endl;
     }
@@ -4444,14 +4434,10 @@ next:
     int i = (specified_shard_id ? shard_id : 0);
 
     if (period_id.empty()) {
-      // read current_period from the realm
-      RGWRealm realm(realm_id, realm_name);
-      int ret = realm.init(g_ceph_context, store);
+      int ret = read_current_period_id(store, realm_id, realm_name, &period_id);
       if (ret < 0) {
-        std::cerr << "failed to init realm: " << cpp_strerror(-ret) << std::endl;
         return ret;
       }
-      period_id = realm.get_current_period();
       std::cerr << "No --period given, using current period="
           << period_id << std::endl;
     }

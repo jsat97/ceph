@@ -41,10 +41,9 @@ class C_handle_notify : public EventCallback {
   C_handle_notify(EventCenter *c, CephContext *cc): center(c), cct(cc) {}
   void do_request(int fd_or_id) {
     char c[256];
-    int r;
     do {
       center->already_wakeup.set(0);
-      r = read(fd_or_id, c, sizeof(c));
+      int r = read(fd_or_id, c, sizeof(c));
       if (r < 0) {
         ldout(cct, 1) << __func__ << " read notify pipe failed: " << cpp_strerror(errno) << dendl;
         break;
@@ -117,7 +116,17 @@ int EventCenter::init(int n)
 
 EventCenter::~EventCenter()
 {
-  assert(external_events.empty() && time_events.empty());
+  {
+    Mutex::Locker l(external_lock);
+    while (!external_events.empty()) {
+      EventCallbackRef e = external_events.front();
+      if (e)
+        e->do_request(0);
+      external_events.pop_front();
+    }
+  }
+  assert(time_events.empty());
+
   if (notify_receive_fd >= 0) {
     delete_file_event(notify_receive_fd, EVENT_READABLE);
     ::close(notify_receive_fd);

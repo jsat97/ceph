@@ -149,8 +149,8 @@
     --order arg               object order [12 <= order <= 25]
     --object-size arg         object size in B/K/M [4K <= object size <= 32M]
     --image-feature arg       image features
-                              [layering(+), striping(+), exclusive-lock(*),
-                              object-map(*), fast-diff(*), deep-flatten,
+                              [layering(+), striping, exclusive-lock(+*),
+                              object-map(+*), fast-diff(+*), deep-flatten(+-),
                               journaling(*)]
     --image-shared            shared image
     --stripe-unit arg         stripe unit
@@ -161,6 +161,7 @@
   
   Image Features:
     (*) supports enabling/disabling on existing images
+    (-) supports disabling-only on existing images
     (+) enabled by default for new images if features not specified
   
   rbd help copy
@@ -192,8 +193,8 @@
     --order arg                  object order [12 <= order <= 25]
     --object-size arg            object size in B/K/M [4K <= object size <= 32M]
     --image-feature arg          image features
-                                 [layering(+), striping(+), exclusive-lock(*),
-                                 object-map(*), fast-diff(*), deep-flatten,
+                                 [layering(+), striping, exclusive-lock(+*),
+                                 object-map(+*), fast-diff(+*), deep-flatten(+-),
                                  journaling(*)]
     --image-shared               shared image
     --stripe-unit arg            stripe unit
@@ -205,6 +206,7 @@
   
   Image Features:
     (*) supports enabling/disabling on existing images
+    (-) supports disabling-only on existing images
     (+) enabled by default for new images if features not specified
   
   rbd help create
@@ -228,14 +230,14 @@
   Optional arguments
     -p [ --pool ] arg         pool name
     --image arg               image name
-    --image-format arg        image format [1 or 2]
+    --image-format arg        image format [1 (deprecated) or 2]
     --new-format              use image format 2
                               (deprecated)
     --order arg               object order [12 <= order <= 25]
     --object-size arg         object size in B/K/M [4K <= object size <= 32M]
     --image-feature arg       image features
-                              [layering(+), striping(+), exclusive-lock(*),
-                              object-map(*), fast-diff(*), deep-flatten,
+                              [layering(+), striping, exclusive-lock(+*),
+                              object-map(+*), fast-diff(+*), deep-flatten(+-),
                               journaling(*)]
     --image-shared            shared image
     --stripe-unit arg         stripe unit
@@ -247,6 +249,7 @@
   
   Image Features:
     (*) supports enabling/disabling on existing images
+    (-) supports disabling-only on existing images
     (+) enabled by default for new images if features not specified
   
   rbd help diff
@@ -473,14 +476,14 @@
     --path arg                import file (or '-' for stdin)
     --dest-pool arg           destination pool name
     --dest arg                destination image name
-    --image-format arg        image format [1 or 2]
+    --image-format arg        image format [1 (deprecated) or 2]
     --new-format              use image format 2
                               (deprecated)
     --order arg               object order [12 <= order <= 25]
     --object-size arg         object size in B/K/M [4K <= object size <= 32M]
     --image-feature arg       image features
-                              [layering(+), striping(+), exclusive-lock(*),
-                              object-map(*), fast-diff(*), deep-flatten,
+                              [layering(+), striping, exclusive-lock(+*),
+                              object-map(+*), fast-diff(+*), deep-flatten(+-),
                               journaling(*)]
     --image-shared            shared image
     --stripe-unit arg         stripe unit
@@ -494,6 +497,7 @@
   
   Image Features:
     (*) supports enabling/disabling on existing images
+    (-) supports disabling-only on existing images
     (+) enabled by default for new images if features not specified
   
   rbd help import-diff
